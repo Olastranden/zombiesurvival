@@ -8,7 +8,7 @@ public class FirstPersonController : MonoBehaviour
     [Header("Movement Speeds")]
     [SerializeField] private float walkSpeed = 3.0f;
     [SerializeField] private float sprintMultiplier = 2.0f;
-
+    // helo
 
     [Header("Jump Parameters")]
     [SerializeField] private float jumpForce = 5.0f;
