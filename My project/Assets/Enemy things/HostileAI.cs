@@ -1,149 +1,183 @@
 using UnityEngine;
-using System.Collections;
 using UnityEngine.AI;
-
 
 public class HostileAI : MonoBehaviour
 {
-    [Header("References")]
-    [SerializeField] private NavMeshAgent navAgent;
-    [SerializeField] private Transform playerTransform;
+    [Header("Patrol")]
+    public Transform[] waypoints;         // Set via inspector
+    public float waypointTolerance = 0.5f; // Distance to consider "reached"
 
+    [Header("Detection & Chase")]
+    public Transform player;              // Assign Player transform in inspector
+    public float detectionRadius = 8f;    // Radius in world units
+    public float chaseStopDistance = 1.5f;// How close to get to player
 
-    [Header("Layers")]
-    [SerializeField] private LayerMask terrainLayer;
-    [SerializeField] private LayerMask playerLayerMask;
+    [Header("Movement & Rotation")]
+    public float rotationSpeed = 10f;     // How fast to face player (slerp)
+    public float moveSpeedMultiplier = 1f;// Agent speed multiplier if needed
 
+    [Header("Misc")]
+    public bool loopPatrol = true;        // If false, patrol back-and-forth
 
-    [Header("Patrol Settings")]
-    [SerializeField] private float patrolRadius = 10f;
-    private Vector3 currentPatrolPoint;
-    private bool hasPatrolPoint;
+    private NavMeshAgent agent;
+    private int currentWaypointIndex = 0;
+    private bool chasing = false;
+    private float sqrDetectionRadius;
+    private Vector3 initialPosition;
+    private float initialY;
+    private bool patrolForward = true;
 
-
-    [Header("Detection Ranges")]
-    [SerializeField] private float visionRange = 1f;
-    [SerializeField] private float engagementRange = 1f;
-
-
-    private bool isPlayerVisible;
-    private bool isPlayerInRange;
-
-
-    private void Awake()
+    void Awake()
     {
-        if (playerTransform == null)
+        agent = GetComponent<NavMeshAgent>();
+        if (agent == null) Debug.LogError("NavMeshAgent missing.");
+        if (player == null)
         {
-            GameObject playerObj = GameObject.Find("Player");
-            if (playerObj != null)
+            var playerGO = GameObject.FindGameObjectWithTag("Player");
+            if (playerGO) player = playerGO.transform;
+        }
+
+        sqrDetectionRadius = detectionRadius * detectionRadius;
+        initialPosition = transform.position;
+        initialY = transform.position.y;
+
+        // We control rotation manually to constrain it to horizontal only.
+        if (agent != null) agent.updateRotation = false;
+    }
+
+    void Start()
+    {
+        if (waypoints != null && waypoints.Length > 0)
+        {
+            agent.isStopped = false;
+            agent.speed *= moveSpeedMultiplier;
+            SetDestinationToCurrentWaypoint();
+        }
+        else
+        {
+            // If no waypoints, just stop agent until player in range
+            agent.isStopped = true;
+        }
+    }
+
+    void Update()
+    {
+        // Keep vertical position locked:
+        if (Mathf.Abs(transform.position.y - initialY) > 0.001f)
+        {
+            Vector3 locked = transform.position;
+            locked.y = initialY;
+            transform.position = locked;
+            // Also ensure agent's nextPosition doesn't drift vertically
+            agent.nextPosition = locked;
+        }
+
+        if (player == null) return;
+
+        float sqrDistToPlayer = (player.position - transform.position).sqrMagnitude;
+
+        if (!chasing && sqrDistToPlayer <= sqrDetectionRadius)
+        {
+            // Enter chase
+            chasing = true;
+            agent.isStopped = false;
+            agent.stoppingDistance = chaseStopDistance;
+        }
+        else if (chasing && sqrDistToPlayer > sqrDetectionRadius)
+        {
+            // Player left detection radius — return to patrol
+            chasing = false;
+            agent.stoppingDistance = 0f;
+            if (waypoints != null && waypoints.Length > 0)
+                SetDestinationToCurrentWaypoint();
+            else
+                agent.isStopped = true;
+        }
+
+        if (chasing)
+        {
+            // chase behavior
+            Vector3 targetPosition = new Vector3(player.position.x, initialY, player.position.z);
+            agent.SetDestination(targetPosition);
+
+            // Rotate to face player horizontally
+            RotateTowards(targetPosition);
+        }
+        else
+        {
+            // patrol behavior if available
+            if (waypoints != null && waypoints.Length > 0)
             {
-                playerTransform = playerObj.transform;
+                if (!agent.pathPending && agent.remainingDistance <= waypointTolerance)
+                {
+                    AdvanceWaypoint();
+                    SetDestinationToCurrentWaypoint();
+                }
+
+                // Face movement direction (optional)
+                if (agent.velocity.sqrMagnitude > 0.01f)
+                {
+                    Vector3 lookTarget = transform.position + new Vector3(agent.velocity.x, 0f, agent.velocity.z);
+                    RotateTowards(lookTarget);
+                }
             }
         }
+    }
 
+    private void RotateTowards(Vector3 target)
+    {
+        Vector3 dir = (target - transform.position);
+        dir.y = 0f; // zero out vertical so no tilt
+        if (dir.sqrMagnitude <= 0.0001f) return;
 
-        if (navAgent == null)
+        Quaternion targetRot = Quaternion.LookRotation(dir.normalized, Vector3.up);
+        transform.rotation = Quaternion.Slerp(transform.rotation, targetRot, Time.deltaTime * rotationSpeed);
+    }
+
+    private void SetDestinationToCurrentWaypoint()
+    {
+        if (waypoints == null || waypoints.Length == 0) return;
+        agent.SetDestination(new Vector3(waypoints[currentWaypointIndex].position.x, initialY, waypoints[currentWaypointIndex].position.z));
+    }
+
+    private void AdvanceWaypoint()
+    {
+        if (waypoints.Length == 0) return;
+
+        if (loopPatrol)
         {
-            navAgent = GetComponent<NavMeshAgent>();
+            currentWaypointIndex = (currentWaypointIndex + 1) % waypoints.Length;
+        }
+        else
+        {
+            // ping-pong
+            if (patrolForward)
+            {
+                currentWaypointIndex++;
+                if (currentWaypointIndex >= waypoints.Length)
+                {
+                    currentWaypointIndex = waypoints.Length - 2 >= 0 ? waypoints.Length - 2 : 0;
+                    patrolForward = false;
+                }
+            }
+            else
+            {
+                currentWaypointIndex--;
+                if (currentWaypointIndex < 0)
+                {
+                    currentWaypointIndex = 1 < waypoints.Length ? 1 : 0;
+                    patrolForward = true;
+                }
+            }
         }
     }
 
-
-    private void Update()
-    {
-        DetectPlayer();
-        UpdateBehaviourState();
-    }
-
-
-    private void OnDrawGizmosSelected()
+    void OnDrawGizmosSelected()
     {
         Gizmos.color = Color.red;
-        Gizmos.DrawWireSphere(transform.position, engagementRange);
-
-
+        Gizmos.DrawWireSphere(transform.position, detectionRadius);
         Gizmos.color = Color.yellow;
-        Gizmos.DrawWireSphere(transform.position, visionRange);
-    }
-
-
-    private void DetectPlayer()
-    {
-        isPlayerVisible = Physics.CheckSphere(transform.position, visionRange, playerLayerMask);
-        isPlayerInRange = Physics.CheckSphere(transform.position, engagementRange, playerLayerMask);
-    }
-
-    private void FindPatrolPoint()
-    {
-        float randomX = Random.Range(-patrolRadius, patrolRadius);
-        float randomZ = Random.Range(-patrolRadius, patrolRadius);
-
-
-        Vector3 potentialPoint = new Vector3(transform.position.x + randomX, transform.position.y, transform.position.z + randomZ);
-
-
-        if (Physics.Raycast(potentialPoint, -transform.up, 2f, terrainLayer))
-        {
-            currentPatrolPoint = potentialPoint;
-            hasPatrolPoint = true;
-        }
-    }
-
-
-
-
-
-    private void PerformPatrol()
-    {
-        if (!hasPatrolPoint)
-            FindPatrolPoint();
-
-
-        if (hasPatrolPoint)
-            navAgent.SetDestination(currentPatrolPoint);
-
-
-        if (Vector3.Distance(transform.position, currentPatrolPoint) < 1f)
-            hasPatrolPoint = false;
-    }
-
-
-    private void PerformChase()
-    {
-        if (playerTransform != null)
-        {
-            navAgent.SetDestination(playerTransform.position);
-        }
-    }
-
-
-    private void PerformAttack()
-    {
-        navAgent.SetDestination(transform.position);
-
-
-        if (playerTransform != null)
-        {
-            transform.LookAt(playerTransform);
-        }
-
-
-    }
-
-
-    private void UpdateBehaviourState()
-    {
-        if (!isPlayerVisible && !isPlayerInRange)
-        {
-            PerformPatrol();
-        }
-        else if (isPlayerVisible && !isPlayerInRange)
-        {
-            PerformChase();
-        }
-        else if (isPlayerVisible && isPlayerInRange)
-        {
-            PerformAttack();
-        }
+        Gizmos.DrawLine(transform.position, transform.position + transform.forward * 1.5f);
     }
 }
+
